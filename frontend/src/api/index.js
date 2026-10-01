@@ -185,6 +185,28 @@ export const guardianApi = {
   cancelVisit: (id, data) => http.post(`/guardian/visits/${id}/cancel`, data)
 }
 
+/** 失物保管与认领交接台：登记封存 · 保管链 · 审核 · 双人交还 · 逾期处置 */
+export const lostFoundApi = {
+  options: () => http.get('/lost-found/options'),
+  publicItems: () => http.get('/lost-found/public-items'),
+  items: (role) => http.get('/lost-found/items', { params: { role } }),
+  item: (id, role) => http.get(`/lost-found/items/${id}`, { params: { role } }),
+  register: (data) => http.post('/lost-found/items', data),
+  transfer: (id, data) => http.post(`/lost-found/items/${id}/transfer`, data),
+  inspect: (id, data) => http.post(`/lost-found/items/${id}/inspect`, data),
+  reseal: (id, data) => http.post(`/lost-found/items/${id}/reseal`, data),
+  createClaim: (id, data) => http.post(`/lost-found/items/${id}/claims`, data),
+  claims: (role, status) => http.get('/lost-found/claims', { params: { role, status } }),
+  claim: (id, role) => http.get(`/lost-found/claims/${id}`, { params: { role } }),
+  supplement: (id, data) => http.post(`/lost-found/claims/${id}/supplement`, data),
+  review: (id, data) => http.post(`/lost-found/claims/${id}/review`, data),
+  returnItem: (id, data) => http.post(`/lost-found/claims/${id}/return`, data),
+  exception: (id, data) => http.post(`/lost-found/claims/${id}/exceptions`, data),
+  resolveException: (id, data) => http.post(`/lost-found/exceptions/${id}/resolve`, data),
+  disposals: (role) => http.get('/lost-found/disposals', { params: { role } }),
+  dispose: (id, data) => http.post(`/lost-found/items/${id}/dispose`, data)
+}
+
 export const statsApi = {
   board: () => http.get('/stats/board')
 }/** 时间小工具：后端 DATETIME 出来是 "yyyy-MM-dd HH:mm:ss" */

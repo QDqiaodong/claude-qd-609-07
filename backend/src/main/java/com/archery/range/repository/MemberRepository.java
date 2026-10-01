@@ -25,6 +25,8 @@ public interface MemberRepository extends JpaRepository<Member, Long> {
 
     Optional<Member> findByCardNoAndStatus(String cardNo, String status);
 
+    Optional<Member> findByIdAndStatus(Long id, String status);
+
     List<Member> findByLevelOrderByIdAsc(String level);
 
     List<Member> findByLevelAndStatusOrderByIdAsc(String level, String status);

@@ -1293,3 +1293,184 @@ INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `r
 INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `role`, `detail`, `created_at`) VALUES (2, 1, 'PICKUP', 'PENDING_PICKUP', '前台-马倩', 'FRONT', '接管人 许建国（尾号1234）现场核验通过，钉住授权 v1 基线', '2026-09-20 09:30:00');
 INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `role`, `detail`, `created_at`) VALUES (3, 1, 'RELEASE', 'TRAINING', '苏禾', 'COACH', '训练开始前整组校验通过：课程 青少年安全射箭课、箭道 A03、器材 E-GR-01 均在 v1 范围内', '2026-09-20 09:35:00');
 INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `role`, `detail`, `created_at`) VALUES (4, 1, 'RETURN', 'PENDING_RETURN', '前台-马倩', 'FRONT', '交还人 许建国 在 v1 接管人名单内，安全交还完成', '2026-09-20 11:30:00');
+
+
+-- ================= 失物保管与认领交接台 =================
+-- 原登记只追加事实，不提供 UPDATE 覆盖；当前保管人 / 封签状态等“现状”随每次交接事件推进。
+CREATE TABLE IF NOT EXISTS lost_found_item (
+  id                  BIGINT       NOT NULL AUTO_INCREMENT,
+  item_no             VARCHAR(24)  NOT NULL COMMENT '失物编号',
+  category            VARCHAR(24)  NOT NULL COMMENT '内部物品类别',
+  public_category     VARCHAR(24)  NOT NULL COMMENT '公开模糊类别',
+  found_area_type     VARCHAR(16)  NOT NULL COMMENT 'LANE 箭道区 / COURSE 课程区 / PUBLIC 公共区',
+  found_area_detail   VARCHAR(128) NOT NULL COMMENT '内部精确发现位置',
+  found_at            DATETIME     NOT NULL,
+  appearance          VARCHAR(500) NOT NULL COMMENT '外观特征（仅工作人员可见）',
+  photo_refs          VARCHAR(1000) NOT NULL COMMENT '现场照片引用 JSON（不在公开列表返回）',
+  finder_type         VARCHAR(16)  NOT NULL COMMENT 'MEMBER 会员 / STAFF 工作人员 / GUEST 访客',
+  finder_member_id    BIGINT       NULL,
+  finder_name         VARCHAR(32)  NOT NULL,
+  finder_contact      VARCHAR(64)  NULL,
+  current_custodian   VARCHAR(32)  NOT NULL COMMENT '当前保管人',
+  storage_area        VARCHAR(64)  NOT NULL COMMENT '当前存放区域',
+  seal_no             VARCHAR(32)  NOT NULL,
+  seal_status         VARCHAR(16)  NOT NULL COMMENT 'INTACT 完好 / OPEN 已开封 / BROKEN 破损',
+  sealed_at           DATETIME     NOT NULL,
+  high_value          TINYINT(1)   NOT NULL DEFAULT 0,
+  identity_item       TINYINT(1)   NOT NULL DEFAULT 0,
+  status              VARCHAR(16)  NOT NULL COMMENT 'CUSTODY 保管中 / RETURNED 已交还 / DISPOSED 已处置',
+  retention_until     DATE         NOT NULL,
+  registered_by       VARCHAR(32)  NOT NULL,
+  created_at          DATETIME     NOT NULL,
+  returned_at         DATETIME     NULL,
+  disposed_at         DATETIME     NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lf_item_no (item_no),
+  KEY idx_lf_item_status (status, retention_until),
+  KEY idx_lf_item_found (found_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 封签生命周期：初始封存、每次开封、重新封存均新增一行；破损由异常事件记录后仍可重新封存。
+CREATE TABLE IF NOT EXISTS lost_found_seal (
+  id             BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id        BIGINT       NOT NULL,
+  seal_no        VARCHAR(32)  NOT NULL,
+  action         VARCHAR(16)  NOT NULL COMMENT 'INITIAL / OPEN / DAMAGE / RESEAL',
+  before_status  VARCHAR(16)  NULL,
+  after_status   VARCHAR(16)  NOT NULL,
+  custodian      VARCHAR(32)  NOT NULL,
+  storage_area   VARCHAR(64)  NOT NULL,
+  reason         VARCHAR(500) NOT NULL,
+  operator       VARCHAR(32)  NOT NULL,
+  operator_role  VARCHAR(16)  NOT NULL,
+  created_at     DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_lf_seal_item (item_id, created_at),
+  CONSTRAINT fk_lf_seal_item FOREIGN KEY (item_id) REFERENCES lost_found_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 认领申请：会员或未建档访客均可；联系方式、隐私特征和证据按角色脱敏返回。
+CREATE TABLE IF NOT EXISTS lost_found_claim (
+  id                  BIGINT       NOT NULL AUTO_INCREMENT,
+  claim_no            VARCHAR(24)  NOT NULL,
+  item_id             BIGINT       NOT NULL,
+  claimant_type       VARCHAR(16)  NOT NULL COMMENT 'MEMBER / GUEST',
+  claimant_member_id  BIGINT       NULL,
+  claimant_name       VARCHAR(32)  NOT NULL,
+  claimant_contact    VARCHAR(64)  NOT NULL,
+  description         VARCHAR(500) NOT NULL COMMENT '认领人描述',
+  lost_time_start     DATETIME     NOT NULL,
+  lost_time_end       DATETIME     NOT NULL,
+  possible_areas      VARCHAR(300) NOT NULL COMMENT '可能箭道 / 课程 / 区域',
+  privacy_feature     VARCHAR(300) NOT NULL COMMENT '仅审核所需的隐私特征',
+  evidence_refs       VARCHAR(1000) NOT NULL COMMENT '补充证明 JSON',
+  status              VARCHAR(16)  NOT NULL COMMENT 'PENDING / SUPPLEMENT / APPROVED / EXCEPTION / RETURNED / REJECTED / TERMINATED',
+  submitted_by        VARCHAR(32)  NOT NULL,
+  submitted_at        DATETIME     NOT NULL,
+  actual_receiver     VARCHAR(32)  NULL,
+  receiver_relation   VARCHAR(32)  NULL,
+  id_verify_method    VARCHAR(64)  NULL,
+  return_custodian    VARCHAR(32)  NULL,
+  return_witness      VARCHAR(32)  NULL,
+  returned_at         DATETIME     NULL,
+  return_note         VARCHAR(500) NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lf_claim_no (claim_no),
+  KEY idx_lf_claim_item (item_id, status),
+  CONSTRAINT fk_lf_claim_item FOREIGN KEY (item_id) REFERENCES lost_found_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 每轮审核独立保留三项结论；补证后新增一轮，不能把原结论改掉。
+CREATE TABLE IF NOT EXISTS lost_found_review (
+  id                   BIGINT       NOT NULL AUTO_INCREMENT,
+  claim_id             BIGINT       NOT NULL,
+  item_id              BIGINT       NOT NULL,
+  review_round         INT          NOT NULL,
+  feature_conclusion   VARCHAR(16)  NOT NULL COMMENT 'PASS / PARTIAL / FAIL',
+  time_place_conclusion VARCHAR(16) NOT NULL,
+  proof_conclusion     VARCHAR(16)  NOT NULL,
+  result               VARCHAR(16)  NOT NULL COMMENT 'APPROVED / SUPPLEMENT / REJECTED',
+  note                 VARCHAR(500) NULL,
+  reviewed_by          VARCHAR(32)  NOT NULL,
+  reviewed_at          DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_lf_review_claim (claim_id, review_round),
+  CONSTRAINT fk_lf_review_claim FOREIGN KEY (claim_id) REFERENCES lost_found_claim (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 待交还阶段的异常：原审核结论保留，先暂停双人交还，经理处理后才能回到待交还或终止。
+CREATE TABLE IF NOT EXISTS lost_found_exception (
+  id                BIGINT       NOT NULL AUTO_INCREMENT,
+  exception_no      VARCHAR(24)  NOT NULL,
+  item_id           BIGINT       NOT NULL,
+  claim_id          BIGINT       NOT NULL,
+  reason            VARCHAR(24)  NOT NULL COMMENT 'BROKEN_SEAL / ITEM_MISMATCH / RECEIVER_CHANGE / CUSTODIAN_ABSENT',
+  detail            VARCHAR(500) NOT NULL,
+  reported_by       VARCHAR(32)  NOT NULL,
+  reporter_role     VARCHAR(16)  NOT NULL,
+  status            VARCHAR(16)  NOT NULL COMMENT 'OPEN / RESOLVED / TERMINATED',
+  resolution        VARCHAR(16)  NULL COMMENT 'RESEAL / REVERIFY_PASS / REVERIFY_FAIL / TERMINATE',
+  resolution_note   VARCHAR(500) NULL,
+  resolved_by       VARCHAR(32)  NULL,
+  created_at        DATETIME     NOT NULL,
+  resolved_at       DATETIME     NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lf_exception_no (exception_no),
+  KEY idx_lf_exception_claim (claim_id, status),
+  CONSTRAINT fk_lf_exception_item FOREIGN KEY (item_id) REFERENCES lost_found_item (id),
+  CONSTRAINT fk_lf_exception_claim FOREIGN KEY (claim_id) REFERENCES lost_found_claim (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 逾期处置台账：高价值 / 带身份信息走不同公安路径，所有路径均留存接收方与凭证。
+CREATE TABLE IF NOT EXISTS lost_found_disposal (
+  id                BIGINT       NOT NULL AUTO_INCREMENT,
+  disposal_no       VARCHAR(24)  NOT NULL,
+  item_id           BIGINT       NOT NULL,
+  method            VARCHAR(16)  NOT NULL COMMENT 'POLICE / DONATE / SCRAP',
+  disposal_path     VARCHAR(24)  NOT NULL COMMENT 'STANDARD / POLICE_HIGH_VALUE / POLICE_IDENTITY / POLICE_JOINT',
+  receiver_name     VARCHAR(64)  NOT NULL,
+  credential_no     VARCHAR(64)  NOT NULL COMMENT '接收凭证号',
+  credential_refs   VARCHAR(1000) NOT NULL COMMENT '凭证照片 / 单据 JSON',
+  note              VARCHAR(500) NULL,
+  disposed_by       VARCHAR(32)  NOT NULL,
+  disposed_at       DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lf_disposal_no (disposal_no),
+  KEY idx_lf_disposal_item (item_id),
+  CONSTRAINT fk_lf_disposal_item FOREIGN KEY (item_id) REFERENCES lost_found_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+
+-- 补证材料独立追加：原认领描述、隐私特征与首轮证据保持不变。
+CREATE TABLE IF NOT EXISTS lost_found_claim_supplement (
+  id             BIGINT       NOT NULL AUTO_INCREMENT,
+  claim_id       BIGINT       NOT NULL,
+  item_id        BIGINT       NOT NULL,
+  evidence_refs  VARCHAR(1000) NOT NULL,
+  note           VARCHAR(500) NOT NULL,
+  submitted_by   VARCHAR(32)  NOT NULL,
+  created_at     DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_lf_supplement_claim (claim_id),
+  CONSTRAINT fk_lf_supplement_claim FOREIGN KEY (claim_id) REFERENCES lost_found_claim (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 统一交接链：登记 / 查看 / 转移 / 开封 / 认领 / 审核 / 异常 / 交还 / 处置全部 append-only。
+CREATE TABLE IF NOT EXISTS lost_found_chain_log (
+  id             BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id        BIGINT       NOT NULL,
+  claim_id       BIGINT       NULL,
+  action         VARCHAR(24)  NOT NULL,
+  before_status  VARCHAR(24)  NULL,
+  after_status   VARCHAR(24)  NULL,
+  operator       VARCHAR(32)  NOT NULL,
+  operator_role  VARCHAR(16)  NOT NULL,
+  detail         VARCHAR(1000) NOT NULL,
+  request_key    VARCHAR(64)  NULL,
+  created_at     DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lf_chain_request (request_key),
+  KEY idx_lf_chain_item (item_id, created_at),
+  KEY idx_lf_chain_claim (claim_id),
+  CONSTRAINT fk_lf_chain_item FOREIGN KEY (item_id) REFERENCES lost_found_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

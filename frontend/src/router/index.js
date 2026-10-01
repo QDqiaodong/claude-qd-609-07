@@ -13,7 +13,8 @@ export const navItems = [
   { key: 'courses', path: '/courses', icon: '📚', label: '课程', hint: '卡片列表，满员禁用报名', badge: 'courseTotal', unit: '门' },
   { key: 'equipment', path: '/equipment', icon: '🧰', label: '器材', hint: '表格 + 租借归还', badge: 'equipRented', unit: '租出' },
   { key: 'damage', path: '/damage', icon: '🧾', label: '清算', hint: '器材损伤清算：发起检查 · 费用明细 · 异议处理 · 补缴解限', badge: 'damageSettling', unit: '单处理中' },
-  { key: 'guardian', path: '/guardian', icon: '🧒', label: '监护授权', hint: '未成年会员监护授权台：授权版本 · 接管核验 · 资源放行 · 安全交还', badge: 'visitOpen', unit: '在馆交接' }
+  { key: 'guardian', path: '/guardian', icon: '🧒', label: '监护授权', hint: '未成年会员监护授权台：授权版本 · 接管核验 · 资源放行 · 安全交还', badge: 'visitOpen', unit: '在馆交接' },
+  { key: 'lost-found', path: '/lost-found', icon: '🧳', label: '失物交接', hint: '失物保管与认领交接台：封签保管链 · 最小化审核 · 双人交还 · 逾期处置', badge: 'lostFoundCustody', unit: '件保管中' }
 ]
 
 export const memberItem = { key: 'members', path: '/members', icon: '🪪', label: '会员', hint: '开卡 / 充值 / 等级', badge: 'memberTotal', unit: '人' }
@@ -29,6 +30,7 @@ const routes = [
   { path: '/equipment', name: 'equipment', component: () => import('../views/EquipmentView.vue') },
   { path: '/damage', name: 'damage', component: () => import('../views/DamageView.vue') },
   { path: '/guardian', name: 'guardian', component: () => import('../views/GuardianView.vue') },
+  { path: '/lost-found', name: 'lost-found', component: () => import('../views/LostFoundView.vue') },
   { path: '/members', name: 'members', component: () => import('../views/MemberView.vue') },
   { path: '/:pathMatch(.*)*', redirect: '/lanes' }
 ]

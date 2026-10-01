@@ -40,6 +40,7 @@ public class StatsService {
     private final com.archery.range.repository.MemberDebtRepository memberDebtRepository;
     private final com.archery.range.repository.GuardianConsentRepository guardianConsentRepository;
     private final com.archery.range.repository.MinorVisitRepository minorVisitRepository;
+    private final com.archery.range.repository.LostFoundItemRepository lostFoundItemRepository;
     private final RoundService roundService;
 
     public StatsService(LaneRepository laneRepository,
@@ -55,6 +56,7 @@ public class StatsService {
             com.archery.range.repository.MemberDebtRepository memberDebtRepository,
             com.archery.range.repository.GuardianConsentRepository guardianConsentRepository,
             com.archery.range.repository.MinorVisitRepository minorVisitRepository,
+            com.archery.range.repository.LostFoundItemRepository lostFoundItemRepository,
             RoundService roundService) {
         this.laneRepository = laneRepository;
         this.memberRepository = memberRepository;
@@ -69,6 +71,7 @@ public class StatsService {
         this.memberDebtRepository = memberDebtRepository;
         this.guardianConsentRepository = guardianConsentRepository;
         this.minorVisitRepository = minorVisitRepository;
+        this.lostFoundItemRepository = lostFoundItemRepository;
         this.roundService = roundService;
     }
 
@@ -100,6 +103,7 @@ public class StatsService {
                 guardianConsentRepository.countByStatus("PENDING_CONFIRM"));
         counters.put("visitOpen", minorVisitRepository.findByStatusInOrderByIdDesc(
                 java.util.List.of("PENDING_PICKUP", "TRAINING", "PENDING_RETURN")).size());
+        counters.put("lostFoundCustody", lostFoundItemRepository.findByStatusOrderByIdDesc("CUSTODY").size());
 
         List<RoundDtos.RoundView> top = roundRepository.findByStatusOrderByStartTimeDesc("SUBMITTED").stream()
                 .sorted(Comparator.comparingInt((com.archery.range.domain.Round r) ->
