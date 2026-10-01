@@ -692,4 +692,228 @@ public final class RangeDict {
     public static String visitActionName(String action) {
         return action == null ? "" : VISIT_ACTION.getOrDefault(action, action);
     }
+
+    // ---------------- 模块十二：失物保管与认领交接台 ----------------
+    /** 物品精确类别（工作人员内部使用，不直接对认领人公示） */
+    private static final Map<String, String> LOST_CATEGORY = Map.of(
+            "WALLET", "钱包证件",
+            "ELECTRONIC", "电子设备",
+            "JEWELRY", "首饰",
+            "CLOTHING", "衣物",
+            "EQUIPMENT", "运动器材",
+            "ACCESSORY", "配饰挂件",
+            "OTHER", "其他物品");
+
+    /** 对外公示用模糊类别（只让真正的失主能凭细节认回） */
+    private static final Map<String, String> LOST_PUBLIC_CATEGORY = Map.of(
+            "VALUABLE", "贵重物品",
+            "ID_BEARING", "带证件物品",
+            "NORMAL", "普通物品");
+
+    /** 物品状态机 */
+    private static final Map<String, String> LOST_STATUS = Map.of(
+            "REGISTERED", "待首次封存",
+            "IN_CUSTODY", "保管中",
+            "TO_RETURN", "待交还",
+            "EXCEPTION", "异常挂起",
+            "RETURNED", "已交还",
+            "TO_DISPOSE", "待处置",
+            "DISPOSED", "已处置");
+
+    /** 发现位置类型 */
+    private static final Map<String, String> FOUND_LOCATION_TYPE = Map.of(
+            "LANE", "箭道",
+            "COURSE", "课程区",
+            "PUBLIC", "公共区域");
+
+    /** 存放区域 */
+    private static final Map<String, String> STORAGE_AREA = Map.of(
+            "FRONT_DESK", "前台失物柜",
+            "SAFE", "贵重物品保险柜",
+            "STORAGE", "仓库货架");
+
+    /** 封签密封状态 */
+    private static final Map<String, String> SEAL_STATE = Map.of(
+            "SEALED", "已封存",
+            "BROKEN", "已开封");
+
+    /** 开封原因 */
+    private static final Map<String, String> SEAL_BREAK_REASON = Map.of(
+            "INSPECT", "工作人员查看",
+            "TRANSFER", "保管转移",
+            "RETURN", "现场交还",
+            "RESEAL", "异常重新封存前核验");
+
+    /** 认领人类型 */
+    private static final Map<String, String> CLAIMANT_TYPE = Map.of(
+            "MEMBER", "现有会员",
+            "VISITOR", "未建档访客");
+
+    /** 认领申请状态 */
+    private static final Map<String, String> CLAIM_STATUS = Map.of(
+            "PENDING", "待审核",
+            "NEED_MORE", "待补证",
+            "APPROVED", "审核通过",
+            "REJECTED", "已驳回",
+            "EXCEPTION", "异常挂起",
+            "TERMINATED", "已终止",
+            "RETURNED", "已交还");
+
+    /** 审核单项结论 */
+    private static final Map<String, String> REVIEW_RESULT = Map.of(
+            "MATCH", "匹配",
+            "MISMATCH", "不符",
+            "UNKNOWN", "待核");
+
+    /** 审核终判 */
+    private static final Map<String, String> REVIEW_DECISION = Map.of(
+            "APPROVE", "审核通过",
+            "NEED_MORE", "要求补证",
+            "REJECT", "驳回");
+
+    /** 现场交接状态 */
+    private static final Map<String, String> HANDOVER_STATUS = Map.of(
+            "PENDING", "待双人确认",
+            "DONE", "已完成",
+            "EXCEPTION", "异常挂起");
+
+    /** 异常交接原因 */
+    private static final Map<String, String> HANDOVER_EXCEPTION = Map.of(
+            "SEAL_DAMAGED", "封签破损",
+            "ITEM_MISMATCH", "实物与登记不符",
+            "RECIPIENT_CHANGED", "领取人临时变更",
+            "CUSTODIAN_ABSENT", "保管人无法到场");
+
+    /** 异常处置方式 */
+    private static final Map<String, String> EXCEPTION_RESOLUTION = Map.of(
+            "RESEAL", "重新封存",
+            "RECHECK", "补充核验",
+            "TERMINATE", "终止本次认领");
+
+    /** 证件核验方式 */
+    private static final Map<String, String> ID_VERIFY_TYPE = Map.of(
+            "ID_CARD", "身份证",
+            "MEMBER_CARD", "会员卡",
+            "DRIVING_LICENSE", "驾照",
+            "OTHER", "其他证件");
+
+    /** 逾期处置结果 */
+    private static final Map<String, String> DISPOSAL_RESULT = Map.of(
+            "POLICE", "返还公安",
+            "DONATE", "捐赠",
+            "SCRAP", "报废");
+
+    /** 失物台角色 */
+    private static final Map<String, String> LOST_ROLE = Map.of(
+            "FRONT", "前台",
+            "KEEPER", "保管员",
+            "COACH", "教练",
+            "MANAGER", "值班经理",
+            "MEMBER", "会员",
+            "VISITOR", "访客",
+            "SYSTEM", "失物系统");
+
+    /** 交接链动作 */
+    private static final Map<String, String> LOST_ACTION = Map.ofEntries(
+            Map.entry("REGISTER", "失物登记"),
+            Map.entry("FIRST_SEAL", "首次封存交接"),
+            Map.entry("UNSEAL", "开封"),
+            Map.entry("RESEAL", "重新封存"),
+            Map.entry("TRANSFER", "保管转移"),
+            Map.entry("CLAIM_CREATE", "提交认领申报"),
+            Map.entry("REVIEW", "分项审核"),
+            Map.entry("NEED_MORE", "要求补证"),
+            Map.entry("REJECT", "驳回认领"),
+            Map.entry("APPROVE", "审核通过"),
+            Map.entry("TO_RETURN", "进入待交还"),
+            Map.entry("EXCEPTION", "异常交接"),
+            Map.entry("EXCEPTION_RESOLVE", "异常处置"),
+            Map.entry("HANDOVER_DONE", "双人现场交还"),
+            Map.entry("MARK_OVERDUE", "逾期转待处置"),
+            Map.entry("DISPOSE", "逾期处置"));
+
+    /** 普通物品保管期限（天） */
+    public static final int LOST_KEEP_DAYS_NORMAL = 30;
+    /** 高价值物品保管期限（天） */
+    public static final int LOST_KEEP_DAYS_HIGH_VALUE = 90;
+
+    public static boolean isValidLostCategory(String c) {
+        return c != null && LOST_CATEGORY.containsKey(c);
+    }
+
+    public static String lostCategoryName(String c) {
+        return c == null ? "" : LOST_CATEGORY.getOrDefault(c, c);
+    }
+
+    public static String lostPublicCategoryName(String c) {
+        return c == null ? "" : LOST_PUBLIC_CATEGORY.getOrDefault(c, c);
+    }
+
+    public static String lostStatusName(String s) {
+        return s == null ? "" : LOST_STATUS.getOrDefault(s, s);
+    }
+
+    public static String foundLocationTypeName(String t) {
+        return t == null ? "" : FOUND_LOCATION_TYPE.getOrDefault(t, t);
+    }
+
+    public static String storageAreaName(String a) {
+        return a == null ? "" : STORAGE_AREA.getOrDefault(a, a);
+    }
+
+    public static String sealStateName(String s) {
+        return s == null ? "" : SEAL_STATE.getOrDefault(s, s);
+    }
+
+    public static String sealBreakReasonName(String r) {
+        return r == null ? "" : SEAL_BREAK_REASON.getOrDefault(r, r);
+    }
+
+    public static String claimantTypeName(String t) {
+        return t == null ? "" : CLAIMANT_TYPE.getOrDefault(t, t);
+    }
+
+    public static String claimStatusName(String s) {
+        return s == null ? "" : CLAIM_STATUS.getOrDefault(s, s);
+    }
+
+    public static String reviewResultName(String r) {
+        return r == null ? "" : REVIEW_RESULT.getOrDefault(r, r);
+    }
+
+    public static String reviewDecisionName(String d) {
+        return d == null ? "" : REVIEW_DECISION.getOrDefault(d, d);
+    }
+
+    public static String handoverStatusName(String s) {
+        return s == null ? "" : HANDOVER_STATUS.getOrDefault(s, s);
+    }
+
+    public static String handoverExceptionName(String r) {
+        return r == null ? "" : HANDOVER_EXCEPTION.getOrDefault(r, r);
+    }
+
+    public static String exceptionResolutionName(String r) {
+        return r == null ? "" : EXCEPTION_RESOLUTION.getOrDefault(r, r);
+    }
+
+    public static boolean isValidIdVerifyType(String t) {
+        return t != null && ID_VERIFY_TYPE.containsKey(t);
+    }
+
+    public static String idVerifyTypeName(String t) {
+        return t == null ? "" : ID_VERIFY_TYPE.getOrDefault(t, t);
+    }
+
+    public static String disposalResultName(String r) {
+        return r == null ? "" : DISPOSAL_RESULT.getOrDefault(r, r);
+    }
+
+    public static String lostRoleName(String role) {
+        return role == null ? "" : LOST_ROLE.getOrDefault(role, role);
+    }
+
+    public static String lostActionName(String action) {
+        return action == null ? "" : LOST_ACTION.getOrDefault(action, action);
+    }
 }

@@ -1294,3 +1294,264 @@ INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `r
 INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `role`, `detail`, `created_at`) VALUES (3, 1, 'RELEASE', 'TRAINING', '苏禾', 'COACH', '训练开始前整组校验通过：课程 青少年安全射箭课、箭道 A03、器材 E-GR-01 均在 v1 范围内', '2026-09-20 09:35:00');
 INSERT INTO minor_visit_log (`id`, `visit_id`, `action`, `stage`, `operator`, `role`, `detail`, `created_at`) VALUES (4, 1, 'RETURN', 'PENDING_RETURN', '前台-马倩', 'FRONT', '交还人 许建国 在 v1 接管人名单内，安全交还完成', '2026-09-20 11:30:00');
 
+-- ================= 模块十二：失物保管与认领交接台 =================
+-- 失物主表：登记即事实，类别 / 发现位置 / 时间 / 外观特征 / 现场照片 / 发现人一经写入再无 UPDATE 内容的入口；
+-- 物品的后续生命（保管、开封、转移、认领、交还、异常、处置）全部沿同一条追加式交接链推进，
+-- 绝不靠修改原登记抹掉前序事实。
+-- 状态机：REGISTERED 待首次封存 → IN_CUSTODY 保管中 → TO_RETURN 待交还（认领审核通过）
+--         → RETURNED 已交还；现场交接异常转 EXCEPTION 异常挂起（暂停交还，原审核结果保留）；
+--         超过保管期限无人认领 → TO_DISPOSE 待处置 → DISPOSED 已处置（终态）。
+CREATE TABLE IF NOT EXISTS lost_item (
+  id                 BIGINT       NOT NULL AUTO_INCREMENT,
+  item_no            VARCHAR(24)  NOT NULL COMMENT '失物编号',
+  category           VARCHAR(16)  NOT NULL COMMENT '类别：WALLET 钱包证件 / ELECTRONIC 电子设备 / JEWELRY 首饰 / CLOTHING 衣物 / EQUIPMENT 运动器材 / ACCESSORY 配饰挂件 / OTHER 其他',
+  public_category    VARCHAR(16)  NOT NULL COMMENT '对外公示用模糊类别：VALUABLE 贵重物品 / ID_BEARING 带证件物品 / NORMAL 普通物品',
+  found_location_type VARCHAR(16) NOT NULL COMMENT '发现位置类型：LANE 箭道 / COURSE 课程区 / PUBLIC 公共区域',
+  found_lane_id      BIGINT       NULL COMMENT '箭道（found_location_type=LANE 时）',
+  found_course_id    BIGINT       NULL COMMENT '课程（found_location_type=COURSE 时）',
+  found_area         VARCHAR(64)  NOT NULL COMMENT '发现区域文字（馆内区域，公示仅显示到区域粒度）',
+  found_at           DATETIME     NOT NULL COMMENT '发现时间',
+  appearance         VARCHAR(500) NOT NULL COMMENT '外观特征（内部核验用，不对认领人公示）',
+  photo_refs         VARCHAR(500) NULL COMMENT '现场照片引用清单（逗号分隔；仅工作人员在权限内查看）',
+  high_value_flag    TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '高价值物品：处置只能走公安移交路径',
+  identity_flag      TINYINT(1)   NOT NULL DEFAULT 0 COMMENT '带身份信息物品：处置只能走公安移交路径',
+  finder_name        VARCHAR(32)  NOT NULL COMMENT '发现人姓名（会员或工作人员）',
+  finder_contact     VARCHAR(64)  NULL COMMENT '发现人联系方式（仅工作人员可见）',
+  finder_role        VARCHAR(16)  NOT NULL COMMENT 'MEMBER 会员 / STAFF 工作人员',
+  registered_by      VARCHAR(32)  NOT NULL COMMENT '登记前台',
+  status             VARCHAR(16)  NOT NULL COMMENT 'REGISTERED / IN_CUSTODY / TO_RETURN / EXCEPTION / RETURNED / TO_DISPOSE / DISPOSED',
+  -- 当前保管态（每次转移 / 重封存沿链更新为最新事实；历史在封签与轨迹中可完整还原）
+  current_custodian  VARCHAR(32)  NULL COMMENT '当前保管人',
+  current_custodian_role VARCHAR(16) NULL COMMENT 'FRONT 前台 / KEEPER 保管员',
+  current_storage_area VARCHAR(32) NULL COMMENT '当前存放区域：FRONT_DESK 前台失物柜 / SAFE 贵重物品保险柜 / STORAGE 仓库货架',
+  current_seal_id    BIGINT       NULL COMMENT '当前封签 id',
+  seal_state         VARCHAR(12)  NULL COMMENT 'SEALED 已封存 / BROKEN 已开封',
+  -- 当前在办认领（在途认领期间锁定；认领终态后清空，可重新发起新认领）
+  active_claim_id    BIGINT       NULL,
+  custody_deadline   DATETIME     NOT NULL COMMENT '保管期限（首次封存时确定；逾期进待处置）',
+  marked_overdue_by   VARCHAR(32) NULL,
+  marked_overdue_at   DATETIME     NULL,
+  created_at         DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_item_no (item_no),
+  KEY idx_lost_item_status (status),
+  KEY idx_lost_item_deadline (custody_deadline)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 失物封签：一枚封签一行，封存时生成，开封即作废（seal_state 由 SEALED 唯一一次转为 BROKEN 并记录开封原因），
+-- 重封存另发新签。当前保管人 / 存放区域 / 密封状态随每枚签固化，任何时候都能沿链还原每一任保管人与密封历史。
+CREATE TABLE IF NOT EXISTS lost_item_seal (
+  id            BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id       BIGINT       NOT NULL,
+  seal_no       VARCHAR(24)  NOT NULL COMMENT '封签号',
+  seal_seq      INT          NOT NULL COMMENT '本物品第几枚封签，从 1 连续',
+  custodian     VARCHAR(32)  NOT NULL COMMENT '封存时保管人',
+  custodian_role VARCHAR(16) NOT NULL COMMENT 'FRONT / KEEPER',
+  storage_area  VARCHAR(32)  NOT NULL COMMENT '存放区域',
+  seal_state    VARCHAR(12)  NOT NULL COMMENT 'SEALED / BROKEN（只能 SEALED → BROKEN 一次）',
+  sealed_by     VARCHAR(32)  NOT NULL,
+  sealed_at     DATETIME     NOT NULL,
+  broken_by     VARCHAR(32)  NULL,
+  broken_at     DATETIME     NULL,
+  break_reason  VARCHAR(500) NULL COMMENT '开封原因：INSPECT 工作人员查看 / TRANSFER 转移 / RETURN 现场交还 / RESEAL 异常重新封存前核验',
+  reseal_note   VARCHAR(500) NULL COMMENT '重封存说明（从本签开封到新签封存之间的核验情况）',
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_seal_no (seal_no),
+  UNIQUE KEY uk_lost_seal_seq (item_id, seal_seq),
+  KEY idx_lost_seal_item (item_id),
+  CONSTRAINT fk_lost_seal_item FOREIGN KEY (item_id) REFERENCES lost_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 认领申请：会员或未建档访客均可发起；一件物品同一时间至多一笔在途认领（PENDING / NEED_MORE / APPROVED / EXCEPTION），
+-- 驳回 / 终止为终态，不能被重新改成已交还；终态后物品如仍在保管可由其他人发起新认领。
+CREATE TABLE IF NOT EXISTS lost_claim (
+  id               BIGINT       NOT NULL AUTO_INCREMENT,
+  claim_no         VARCHAR(24)  NOT NULL COMMENT '认领单号',
+  item_id          BIGINT       NOT NULL,
+  claimant_type    VARCHAR(16)  NOT NULL COMMENT 'MEMBER 现有会员 / VISITOR 未建档访客',
+  member_id        BIGINT       NULL COMMENT '会员认领时的会员 id',
+  claimant_name    VARCHAR(32)  NOT NULL COMMENT '认领人姓名',
+  claimant_phone   VARCHAR(64)  NULL COMMENT '认领人联系方式（敏感信息：仅前台 / 经理在必要环节可见）',
+  -- 认领申报（核验依据）：经理只能看到完成核验所需的最少信息
+  claim_desc       VARCHAR(500) NOT NULL COMMENT '认领人提供的物品描述',
+  lost_time_from   DATETIME     NOT NULL COMMENT '自述遗失时间范围起',
+  lost_time_to     DATETIME     NOT NULL COMMENT '自述遗失时间范围止',
+  possible_lane_id BIGINT       NULL COMMENT '可能出现的箭道',
+  possible_course_id BIGINT     NULL COMMENT '可能出现的课程',
+  possible_area    VARCHAR(64)  NULL COMMENT '可能出现的其他馆内区域',
+  privacy_features VARCHAR(500) NOT NULL COMMENT '用于核验的隐私特征（不对外公示；教练 / 会员不可见）',
+  supplementary    VARCHAR(500) NULL COMMENT '补证材料（按经理要求补充，追加留痕，不覆盖首次申报）',
+  status           VARCHAR(16)  NOT NULL COMMENT 'PENDING / NEED_MORE / APPROVED / REJECTED / EXCEPTION / TERMINATED / RETURNED',
+  created_by       VARCHAR(32)  NOT NULL COMMENT '录入前台',
+  created_at       DATETIME     NOT NULL,
+  decided_by       VARCHAR(32)  NULL COMMENT '审核值班经理',
+  decided_at       DATETIME     NULL,
+  terminate_reason VARCHAR(500) NULL,
+  terminated_by    VARCHAR(32)  NULL,
+  terminated_at    DATETIME     NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_claim_no (claim_no),
+  KEY idx_lost_claim_item (item_id, status),
+  CONSTRAINT fk_lost_claim_item FOREIGN KEY (item_id) REFERENCES lost_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 认领审核结论（每轮一行，补证重新提交另起一轮，旧结论保留可查）：三项结论分别给出
+-- FEATURE 特征匹配 / TIME_PLACE 时间地点吻合 / SUPPORT 补充证明；
+-- 终判 APPROVE 通过 / NEED_MORE 要求补证 / REJECT 驳回；驳回与要求补证必须填写原因。
+CREATE TABLE IF NOT EXISTS lost_claim_review (
+  id              BIGINT       NOT NULL AUTO_INCREMENT,
+  claim_id        BIGINT       NOT NULL,
+  review_round    INT          NOT NULL COMMENT '审核轮次，从 1 递增（补证重提 +1）',
+  feature_result  VARCHAR(10)  NOT NULL COMMENT 'MATCH 匹配 / MISMATCH 不符 / UNKNOWN 待核',
+  timeplace_result VARCHAR(10) NOT NULL,
+  support_result  VARCHAR(10)  NOT NULL,
+  feature_note    VARCHAR(500) NULL,
+  timeplace_note  VARCHAR(500) NULL,
+  support_note    VARCHAR(500) NULL,
+  decision        VARCHAR(12)  NOT NULL COMMENT 'APPROVE / NEED_MORE / REJECT',
+  review_note     VARCHAR(500) NOT NULL COMMENT '审核意见（要求补证 / 驳回时必填具体原因）',
+  reviewed_by     VARCHAR(32)  NOT NULL COMMENT '审核值班经理',
+  reviewed_at     DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_review_round (claim_id, review_round),
+  KEY idx_lost_review_claim (claim_id),
+  CONSTRAINT fk_lost_review_claim FOREIGN KEY (claim_id) REFERENCES lost_claim (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 现场认领交接：审核通过后必须由当前保管人与另一名工作人员双人完成。
+-- 异常时本表挂起（exception_*），保留原审核结果与已采集信息，异常处理后用同一条记录继续双人交还，
+-- 绝不让一条失败 / 异常的交接被直接改成已交还（状态与双人确认字段只允许写入一次）。
+CREATE TABLE IF NOT EXISTS lost_handover (
+  id                 BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id            BIGINT       NOT NULL,
+  claim_id           BIGINT       NOT NULL,
+  custodian          VARCHAR(32)  NOT NULL COMMENT '当前保管人（交还第一确认人）',
+  custodian_role     VARCHAR(16)  NOT NULL,
+  witness            VARCHAR(32)  NULL COMMENT '另一名工作人员（交还第二确认人，必须不同于保管人）',
+  witness_role       VARCHAR(16)  NULL COMMENT 'FRONT / KEEPER / COACH / MANAGER',
+  receiver_name      VARCHAR(32)  NULL COMMENT '实际领取人（交接现场核验，允许与申报认领人不同，但须经异常流程）',
+  receiver_id_type   VARCHAR(16)  NULL COMMENT '证件核验方式：ID_CARD 身份证 / MEMBER_CARD 会员卡 / DRIVING_LICENSE 驾照 / OTHER 其他证件',
+  receiver_id_no     VARCHAR(64)  NULL COMMENT '证件核验标识（后四位等）',
+  status             VARCHAR(12)  NOT NULL COMMENT 'PENDING 待双人确认 / DONE 已完成 / EXCEPTION 异常挂起',
+  confirmed_by       VARCHAR(32)  NULL COMMENT '主持交还的前台',
+  handover_at        DATETIME     NULL,
+  -- 异常挂起：封签破损 / 实物与登记不符 / 领取人临时变更 / 保管人无法到场
+  exception_reason   VARCHAR(20)  NULL COMMENT 'SEAL_DAMAGED / ITEM_MISMATCH / RECIPIENT_CHANGED / CUSTODIAN_ABSENT',
+  exception_detail   VARCHAR(500) NULL,
+  exception_by       VARCHAR(32)  NULL,
+  exception_at       DATETIME     NULL,
+  resolution         VARCHAR(20)  NULL COMMENT '经理处置：RESEAL 重新封存 / RECHECK 补充核验 / TERMINATE 终止认领',
+  resolution_detail  VARCHAR(500) NULL,
+  resolved_by        VARCHAR(32)  NULL,
+  resolved_at        DATETIME     NULL,
+  created_by         VARCHAR(32)  NOT NULL,
+  created_at         DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_handover_claim (item_id, claim_id),
+  KEY idx_lost_handover_claim (claim_id),
+  CONSTRAINT fk_lost_handover_item FOREIGN KEY (item_id) REFERENCES lost_item (id),
+  CONSTRAINT fk_lost_handover_claim FOREIGN KEY (claim_id) REFERENCES lost_claim (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 逾期处置登记：值班经理登记返还公安 / 捐赠 / 报废结果与接收方凭证。
+-- 高价值物品 / 带身份信息物品只能 POLICE 返还公安；任何处置路径都必须留接收方凭证。
+CREATE TABLE IF NOT EXISTS lost_item_disposal (
+  id               BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id          BIGINT       NOT NULL,
+  result           VARCHAR(16)  NOT NULL COMMENT 'POLICE 返还公安 / DONATE 捐赠 / SCRAP 报废',
+  receiver_name    VARCHAR(64)  NOT NULL COMMENT '接收方名称（派出所 / 受捐机构 / 报废处理单位）',
+  receiver_contact VARCHAR(64)  NULL COMMENT '接收方联系方式',
+  receipt_no       VARCHAR(48)  NOT NULL COMMENT '接收方凭证编号（回执单号等）',
+  receipt_note     VARCHAR(500) NULL COMMENT '凭证说明',
+  disposed_by      VARCHAR(32)  NOT NULL COMMENT '处置值班经理',
+  disposed_at      DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_lost_disposal_item (item_id),
+  CONSTRAINT fk_lost_disposal_item FOREIGN KEY (item_id) REFERENCES lost_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 失物交接链（追加式账本）：登记 / 首次封存 / 查看开封 / 重封存 / 转移 / 认领申请 /
+-- 审核（特征 / 时地 / 补证三结论与通过 / 补证 / 驳回）/ 进入待交还 / 异常 / 异常处置 / 双人交还 / 逾期 / 处置，全程留痕。
+-- 只追加不修改：任何业务步骤失败都不写本链；重试以物品状态 / 封签状态为闸，不允许重复生成交接记录。
+CREATE TABLE IF NOT EXISTS lost_property_log (
+  id          BIGINT       NOT NULL AUTO_INCREMENT,
+  item_id     BIGINT       NOT NULL,
+  claim_id    BIGINT       NULL,
+  seal_id     BIGINT       NULL,
+  action      VARCHAR(24)  NOT NULL COMMENT 'REGISTER / FIRST_SEAL / UNSEAL / RESEAL / TRANSFER / CLAIM_CREATE / REVIEW / NEED_MORE / REJECT / APPROVE / TO_RETURN / EXCEPTION / EXCEPTION_RESOLVE / HANDOVER_DONE / MARK_OVERDUE / DISPOSE',
+  before_status VARCHAR(16) NULL,
+  after_status  VARCHAR(16) NULL,
+  operator    VARCHAR(32)  NOT NULL,
+  role        VARCHAR(16)  NOT NULL COMMENT 'FRONT 前台 / KEEPER 保管员 / COACH 教练 / MANAGER 值班经理 / MEMBER 会员 / VISITOR 访客 / SYSTEM 系统',
+  detail      VARCHAR(500) NULL,
+  created_at  DATETIME     NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_lost_log_item (item_id),
+  KEY idx_lost_log_claim (claim_id),
+  CONSTRAINT fk_lost_log_item FOREIGN KEY (item_id) REFERENCES lost_item (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- 失物种子 1：保管中的普通物品（黑色钱包，内含证件 → 身份物品），封签完好
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `created_at`) VALUES (1, 'L20260920001', 'WALLET', 'ID_BEARING', 'LANE', 7, NULL, 'A07 箭道', '2026-09-20 14:20:00', '黑色对折皮质钱包，内有身份证（陈姓）、银行卡两张、现金若干，边角有磨白痕迹', 'photo://lost/L20260920001-1.jpg', 0, 1, '郑楠', '13800010007', 'MEMBER', '前台-马倩', 'IN_CUSTODY', '前台-马倩', 'FRONT', 'FRONT_DESK', 1, 'SEALED', NULL, '2026-10-20 23:59:59', '2026-09-20 14:35:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`) VALUES (1, 1, 'S20260920001', 1, '前台-马倩', 'FRONT', 'FRONT_DESK', 'SEALED', '前台-马倩', '2026-09-20 14:35:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (1, 1, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：黑色对折皮质钱包；发现位置 A07 箭道；发现人 郑楠（会员）；已拍现场照片', '2026-09-20 14:30:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (2, 1, 1, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '前台-马倩', 'FRONT', '值班前台生成封签 S20260920001 并完成首次交接：保管人 前台-马倩，存放 前台失物柜，封签密封；保管期限至 2026-10-20', '2026-09-20 14:35:00');
+
+-- 失物种子 2：保管中，认领申请待经理审核（访客称丢失智能手表）
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `created_at`) VALUES (2, 'L20260921001', 'ELECTRONIC', 'VALUABLE', 'COURSE', NULL, 3, '二号教学区（瞄点与稳定训练）', '2026-09-21 20:50:00', '黑色运动智能手表，表带有汗渍划痕，表盘背刻缩写 W.T.，充电器不在内', 'photo://lost/L20260921001-1.jpg', 0, 0, '李慕白', NULL, 'STAFF', '前台-马倩', 'IN_CUSTODY', '前台-马倩', 'FRONT', 'FRONT_DESK', 2, 'SEALED', 1, '2026-10-21 23:59:59', '2026-09-21 21:00:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`) VALUES (2, 2, 'S20260921001', 1, '前台-马倩', 'FRONT', 'FRONT_DESK', 'SEALED', '前台-马倩', '2026-09-21 21:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (3, 2, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：黑色运动智能手表；发现位置 二号教学区（课程：瞄点与稳定训练）；发现人 李慕白（工作人员）', '2026-09-21 20:55:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (4, 2, 2, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '前台-马倩', 'FRONT', '生成封签 S20260921001 完成首次交接：保管人 前台-马倩，存放 前台失物柜；保管期限至 2026-10-21', '2026-09-21 21:00:00');
+INSERT INTO lost_claim (`id`, `claim_no`, `item_id`, `claimant_type`, `member_id`, `claimant_name`, `claimant_phone`, `claim_desc`, `lost_time_from`, `lost_time_to`, `possible_lane_id`, `possible_course_id`, `possible_area`, `privacy_features`, `status`, `created_by`, `created_at`) VALUES (1, 'CL20260925001', 2, 'VISITOR', NULL, '王涛', '13700000021', '一块黑色运动手表，表盘背面刻了我名字缩写', '2026-09-21 19:30:00', '2026-09-21 21:00:00', NULL, 3, '二号教学区', '表盘背刻缩写 W.T.；原配硅胶表带第三格有裂口', 'PENDING', '前台-马倩', '2026-09-25 18:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (5, 2, 1, 'CLAIM_CREATE', NULL, NULL, '前台-马倩', 'FRONT', '访客 王涛 提交认领申报：自述 9-21 晚在二号教学区上瞄点与稳定训练课时遗失黑色运动手表，已登记隐私特征供值班经理核验', '2026-09-25 18:00:00');
+
+-- 失物种子 3：高价值物品，认领已审核通过、待双人现场交还
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `created_at`) VALUES (3, 'L20260926001', 'JEWELRY', 'VALUABLE', 'PUBLIC', NULL, NULL, '前台休息区沙发缝隙', '2026-09-26 16:10:00', '金色细项链一条，坠子为小弓箭造型，扣环处有细小划痕，重约 6 克', 'photo://lost/L20260926001-1.jpg', 1, 0, '保洁-孙阿姨', NULL, 'STAFF', '前台-马倩', 'TO_RETURN', '保管员-老周', 'KEEPER', 'SAFE', 4, 'SEALED', 2, '2026-12-25 23:59:59', '2026-09-26 16:20:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`) VALUES (3, 3, 'S20260926001', 1, '前台-马倩', 'FRONT', 'FRONT_DESK', 'SEALED', '前台-马倩', '2026-09-26 16:20:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`) VALUES (4, 3, 'S20260926002', 2, '保管员-老周', 'KEEPER', 'SAFE', 'SEALED', '保管员-老周', '2026-09-26 17:00:00');
+UPDATE lost_item_seal SET seal_state = 'BROKEN', broken_by = '保管员-老周', broken_at = '2026-09-26 16:55:00', break_reason = 'TRANSFER', reseal_note = '高价值物品由前台失物柜转入贵重物品保险柜，转移核验外观与登记一致，随后由保管员重封存 S20260926002' WHERE id = 3;
+INSERT INTO lost_claim (`id`, `claim_no`, `item_id`, `claimant_type`, `member_id`, `claimant_name`, `claimant_phone`, `claim_desc`, `lost_time_from`, `lost_time_to`, `possible_lane_id`, `possible_course_id`, `possible_area`, `privacy_features`, `status`, `created_by`, `created_at`, `decided_by`, `decided_at`) VALUES (2, 'CL20260927001', 3, 'MEMBER', 8, '何清', '13800010008', '金色细项链，小弓箭吊坠，是去年比赛奖品', '2026-09-26 15:30:00', '2026-09-26 16:30:00', NULL, NULL, '前台休息区', '坠子背面刻有比赛日期 2025.08；扣环内侧有我自己缠的一圈透明鱼线', 'APPROVED', '前台-马倩', '2026-09-27 10:00:00', '值班经理-冯珊', '2026-09-27 11:00:00');
+INSERT INTO lost_claim_review (`id`, `claim_id`, `review_round`, `feature_result`, `timeplace_result`, `support_result`, `feature_note`, `timeplace_note`, `support_note`, `decision`, `review_note`, `reviewed_by`, `reviewed_at`) VALUES (1, 2, 1, 'MATCH', 'MATCH', 'MATCH', '隐私特征（坠背刻字、扣环鱼线）与实物一致，描述的弓箭造型吊坠吻合', '自述遗失时段覆盖发现时间 16:10，区域同为前台休息区', '会员参赛记录与所述去年赛事奖品相互印证', 'APPROVE', '三项核验均通过，同意认领，进入双人现场交还', '值班经理-冯珊', '2026-09-27 11:00:00');
+INSERT INTO lost_handover (`id`, `item_id`, `claim_id`, `custodian`, `custodian_role`, `status`, `created_by`, `created_at`) VALUES (1, 3, 2, '保管员-老周', 'KEEPER', 'PENDING', '前台-马倩', '2026-09-27 11:05:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (6, 3, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：金色细项链（小弓箭吊坠）；发现位置 前台休息区沙发缝隙；发现人 保洁-孙阿姨；标记为高价值物品', '2026-09-26 16:20:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (7, 3, 3, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '前台-马倩', 'FRONT', '生成封签 S20260926001 完成首次交接：保管人 前台-马倩，存放 前台失物柜；高价值物品保管期限 90 天', '2026-09-26 16:20:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (8, 3, 3, 'UNSEAL', NULL, NULL, '保管员-老周', 'KEEPER', '因转移开封：高价值物品按规定移入贵重物品保险柜，封签 S20260926001 作废', '2026-09-26 16:55:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (9, 3, 4, 'TRANSFER', NULL, NULL, '保管员-老周', 'KEEPER', '保管人 前台-马倩 → 保管员-老周；存放区域 前台失物柜 → 贵重物品保险柜；重封存 S20260926002', '2026-09-26 17:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (10, 3, 2, 'CLAIM_CREATE', NULL, NULL, '前台-马倩', 'FRONT', '会员 何清 提交认领申报：金色弓箭吊坠项链，自述遗失于前台休息区', '2026-09-27 10:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (11, 3, 2, 'REVIEW', NULL, NULL, '值班经理-冯珊', 'MANAGER', '第 1 轮审核：特征匹配 / 时间地点吻合 / 补充证明通过', '2026-09-27 11:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (12, 3, 2, 'APPROVE', NULL, NULL, '值班经理-冯珊', 'MANAGER', '审核通过：进入待交还，须由当前保管人与另一名工作人员双人现场确认', '2026-09-27 11:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (13, 3, 2, 'TO_RETURN', 'IN_CUSTODY', 'TO_RETURN', '值班经理-冯珊', 'MANAGER', '物品进入待交还，等待保管员-老周与另一名工作人员共同完成现场认领交接', '2026-09-27 11:00:00');
+
+-- 失物种子 4：普通衣物已逾期，待处置（登记 + 首次封签 + 逾期标记）
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `marked_overdue_by`, `marked_overdue_at`, `created_at`) VALUES (4, 'L20260820001', 'CLOTHING', 'NORMAL', 'PUBLIC', NULL, NULL, '更衣室 3 号柜', '2026-08-20 19:40:00', '灰色连帽运动外套，左袖有墨水点，内领手写“林”字', 'photo://lost/L20260820001-1.jpg', 0, 0, '前台-马倩', NULL, 'STAFF', '前台-马倩', 'TO_DISPOSE', '保管员-老周', 'KEEPER', 'STORAGE', 5, 'SEALED', NULL, '2026-09-19 23:59:59', '值班经理-冯珊', '2026-09-22 09:00:00', '2026-08-20 20:00:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`) VALUES (5, 4, 'S20260820001', 1, '保管员-老周', 'KEEPER', 'STORAGE', 'SEALED', '保管员-老周', '2026-08-21 10:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (14, 4, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：灰色连帽运动外套；发现位置 更衣室 3 号柜；发现人 前台-马倩（工作人员代交）', '2026-08-20 20:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (15, 4, 5, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '保管员-老周', 'KEEPER', '生成封签 S20260820001 完成首次交接：保管人 保管员-老周，存放 仓库货架；普通物品保管期限 30 天', '2026-08-21 10:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (16, 4, 'MARK_OVERDUE', 'IN_CUSTODY', 'TO_DISPOSE', '值班经理-冯珊', 'MANAGER', '保管期限 2026-09-19 已过且无人认领，转入待处置清单', '2026-09-22 09:00:00');
+
+-- 失物种子 5：身份物品已处置（返还公安，凭证齐全，终态）
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `marked_overdue_by`, `marked_overdue_at`, `created_at`) VALUES (5, 'L20260710001', 'WALLET', 'ID_BEARING', 'PUBLIC', NULL, NULL, '馆门口停车区', '2026-07-10 20:30:00', '棕色卡包，内含身份证、社保卡、两张会员卡，无现金', 'photo://lost/L20260710001-1.jpg', 0, 1, '会员-吴桐', '13800010006', 'MEMBER', '前台-马倩', 'DISPOSED', NULL, NULL, NULL, 6, 'BROKEN', NULL, '2026-08-09 23:59:59', '值班经理-冯珊', '2026-08-10 09:00:00', '2026-07-10 20:40:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`, `broken_by`, `broken_at`, `break_reason`, `reseal_note`) VALUES (6, 5, 'S20260710001', 1, '前台-马倩', 'FRONT', 'FRONT_DESK', 'BROKEN', '前台-马倩', '2026-07-10 20:45:00', '值班经理-冯珊', '2026-08-11 10:00:00', 'RESEAL', '带身份信息逾期无人认领，按规定移交站前派出所，封签在经理监督下开拆核验');
+INSERT INTO lost_item_disposal (`id`, `item_id`, `result`, `receiver_name`, `receiver_contact`, `receipt_no`, `receipt_note`, `disposed_by`, `disposed_at`) VALUES (1, 5, 'POLICE', '站前派出所失物窗口', '0571-88001100', 'POLICE-20260811-018', '内含身份证、社保卡等身份物品整包移交，民警当面清点签收', '值班经理-冯珊', '2026-08-11 10:20:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (17, 5, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：棕色卡包（含身份证 / 社保卡）；发现位置 馆门口停车区；发现人 会员-吴桐；标记为带身份信息物品', '2026-07-10 20:40:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (18, 5, 6, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '前台-马倩', 'FRONT', '生成封签 S20260710001 完成首次交接：保管人 前台-马倩，存放 前台失物柜', '2026-07-10 20:45:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (19, 5, 'MARK_OVERDUE', 'IN_CUSTODY', 'TO_DISPOSE', '值班经理-冯珊', 'MANAGER', '保管期限 2026-08-09 已过且无人认领，转入待处置；带身份信息物品须走公安移交路径', '2026-08-10 09:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (20, 5, 6, 'UNSEAL', NULL, NULL, '值班经理-冯珊', 'MANAGER', '因移交公安开拆核验：封签 S20260710001 作废', '2026-08-11 10:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (21, 5, 'DISPOSE', 'TO_DISPOSE', 'DISPOSED', '值班经理-冯珊', 'MANAGER', '逾期处置：返还公安；接收方 站前派出所失物窗口；凭证号 POLICE-20260811-018', '2026-08-11 10:20:00');
+
+-- 失物种子 6：待交还交接时发现封签破损，异常挂起（原审核结果保留）
+INSERT INTO lost_item (`id`, `item_no`, `category`, `public_category`, `found_location_type`, `found_lane_id`, `found_course_id`, `found_area`, `found_at`, `appearance`, `photo_refs`, `high_value_flag`, `identity_flag`, `finder_name`, `finder_contact`, `finder_role`, `registered_by`, `status`, `current_custodian`, `current_custodian_role`, `current_storage_area`, `current_seal_id`, `seal_state`, `active_claim_id`, `custody_deadline`, `created_at`) VALUES (6, 'L20260918001', 'ELECTRONIC', 'NORMAL', 'LANE', 10, NULL, 'A10 箭道', '2026-09-18 11:30:00', '白色无线降噪耳机一只（右耳），充电盒不在，耳套有明显发黄', 'photo://lost/L20260918001-1.jpg', 0, 0, '会员-许静', '13800010010', 'MEMBER', '前台-马倩', 'EXCEPTION', '前台-马倩', 'FRONT', 'FRONT_DESK', 7, 'BROKEN', 3, '2026-10-18 23:59:59', '2026-09-18 11:45:00');
+INSERT INTO lost_item_seal (`id`, `item_id`, `seal_no`, `seal_seq`, `custodian`, `custodian_role`, `storage_area`, `seal_state`, `sealed_by`, `sealed_at`, `broken_by`, `broken_at`, `break_reason`) VALUES (7, 6, 'S20260918001', 1, '前台-马倩', 'FRONT', 'FRONT_DESK', 'BROKEN', '前台-马倩', '2026-09-18 11:45:00', '前台-马倩', '2026-09-29 15:00:00', 'RETURN');
+INSERT INTO lost_claim (`id`, `claim_no`, `item_id`, `claimant_type`, `member_id`, `claimant_name`, `claimant_phone`, `claim_desc`, `lost_time_from`, `lost_time_to`, `possible_lane_id`, `possible_course_id`, `possible_area`, `privacy_features`, `status`, `created_by`, `created_at`, `decided_by`, `decided_at`) VALUES (3, 'CL20260928001', 6, 'MEMBER', 2, '林悦', '13800010002', '右耳白色降噪耳机一只，耳套用久了发黄', '2026-09-18 11:00:00', '2026-09-18 12:00:00', 10, NULL, 'A10 附近', '右耳耳机内侧激光序列号后四位 8842', 'EXCEPTION', '前台-马倩', '2026-09-28 16:00:00', '值班经理-冯珊', '2026-09-28 17:00:00');
+INSERT INTO lost_claim_review (`id`, `claim_id`, `review_round`, `feature_result`, `timeplace_result`, `support_result`, `feature_note`, `timeplace_note`, `support_note`, `decision`, `review_note`, `reviewed_by`, `reviewed_at`) VALUES (2, 3, 1, 'MATCH', 'MATCH', 'UNKNOWN', '申报的右耳单只、耳套发黄与序列号尾号与实物一致', '遗失时段与发现时间、A10 区域吻合', '未提供购买凭证，但特征与时空均强吻合，予以通过，交还时再次核验证件', 'APPROVE', '特征与时空两项通过，同意认领；交还现场须再次核验证件并双人确认', '值班经理-冯珊', '2026-09-28 17:00:00');
+INSERT INTO lost_handover (`id`, `item_id`, `claim_id`, `custodian`, `custodian_role`, `status`, `confirmed_by`, `exception_reason`, `exception_detail`, `exception_by`, `exception_at`, `created_by`, `created_at`) VALUES (2, 6, 3, '前台-马倩', 'FRONT', 'EXCEPTION', NULL, 'SEAL_DAMAGED', '现场准备交还时发现封签 S20260918001 边缘开裂，无法确认开拆历史，暂停交还', '前台-马倩', '2026-09-29 15:05:00', '前台-马倩', '2026-09-29 14:50:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (22, 6, 'REGISTER', NULL, 'REGISTERED', '前台-马倩', 'FRONT', '失物登记：白色无线降噪耳机（右耳单只）；发现位置 A10 箭道；发现人 会员-许静', '2026-09-18 11:40:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `seal_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (23, 6, 7, 'FIRST_SEAL', 'REGISTERED', 'IN_CUSTODY', '前台-马倩', 'FRONT', '生成封签 S20260918001 完成首次交接：保管人 前台-马倩，存放 前台失物柜', '2026-09-18 11:45:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (24, 6, 3, 'CLAIM_CREATE', NULL, NULL, '前台-马倩', 'FRONT', '会员 林悦 提交认领申报：右耳白色降噪耳机，自述遗失于 A10 箭道', '2026-09-28 16:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (25, 6, 3, 'REVIEW', NULL, NULL, '值班经理-冯珊', 'MANAGER', '第 1 轮审核：特征匹配 / 时间地点吻合 / 补充证明待核', '2026-09-28 17:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (26, 6, 3, 'APPROVE', NULL, NULL, '值班经理-冯珊', 'MANAGER', '审核通过：进入待交还，双人现场交还', '2026-09-28 17:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (27, 6, 3, 'TO_RETURN', 'IN_CUSTODY', 'TO_RETURN', '值班经理-冯珊', 'MANAGER', '物品进入待交还', '2026-09-28 17:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (28, 6, 7, 'UNSEAL', NULL, NULL, '前台-马倩', 'FRONT', '因现场交还开封：封签 S20260918001 开拆', '2026-09-29 15:00:00');
+INSERT INTO lost_property_log (`id`, `item_id`, `claim_id`, `action`, `before_status`, `after_status`, `operator`, `role`, `detail`, `created_at`) VALUES (29, 6, 3, 'EXCEPTION', 'TO_RETURN', 'EXCEPTION', '前台-马倩', 'FRONT', '异常交接：封签破损（边缘开裂，无法确认开拆历史），暂停交还；原审核结果保留，等待值班经理选择重新封存 / 补充核验 / 终止认领', '2026-09-29 15:05:00');
+
+

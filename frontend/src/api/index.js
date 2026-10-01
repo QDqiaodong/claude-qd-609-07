@@ -185,6 +185,29 @@ export const guardianApi = {
   cancelVisit: (id, data) => http.post(`/guardian/visits/${id}/cancel`, data)
 }
 
+/** 模块十二：失物保管与认领交接台（登记 · 封签保管链 · 认领审核 · 双人交还 · 逾期处置） */
+export const lostApi = {
+  options: () => http.get('/lost/options'),
+  publicList: () => http.get('/lost/public'),
+  list: (params) => http.get('/lost/items', { params }),
+  detail: (id, role) => http.get(`/lost/items/${id}`, { params: { role } }),
+  reviewPack: (id, includePhoto) => http.get(`/lost/items/${id}/review-pack`, { params: { includePhoto } }),
+  register: (data) => http.post('/lost/items', data),
+  firstSeal: (id, data) => http.post(`/lost/items/${id}/first-seal`, data),
+  inspect: (id, data) => http.post(`/lost/items/${id}/inspect`, data),
+  reseal: (id, data) => http.post(`/lost/items/${id}/reseal`, data),
+  transfer: (id, data) => http.post(`/lost/items/${id}/transfer`, data),
+  createClaim: (id, data) => http.post(`/lost/items/${id}/claims`, data),
+  supplement: (claimId, data) => http.post(`/lost/claims/${claimId}/supplement`, data),
+  review: (claimId, data) => http.post(`/lost/claims/${claimId}/review`, data),
+  startHandover: (id, operator) => http.post(`/lost/items/${id}/handovers`, null, { params: { operator } }),
+  completeHandover: (id, data) => http.post(`/lost/items/${id}/handovers/complete`, data),
+  reportException: (id, data) => http.post(`/lost/items/${id}/handovers/exception`, data),
+  resolveException: (id, data) => http.post(`/lost/items/${id}/handovers/resolve`, data),
+  markOverdue: (data) => http.post('/lost/overdue/mark', data),
+  dispose: (id, data) => http.post(`/lost/items/${id}/dispose`, data)
+}
+
 export const statsApi = {
   board: () => http.get('/stats/board')
 }/** 时间小工具：后端 DATETIME 出来是 "yyyy-MM-dd HH:mm:ss" */

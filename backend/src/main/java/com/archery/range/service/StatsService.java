@@ -40,6 +40,8 @@ public class StatsService {
     private final com.archery.range.repository.MemberDebtRepository memberDebtRepository;
     private final com.archery.range.repository.GuardianConsentRepository guardianConsentRepository;
     private final com.archery.range.repository.MinorVisitRepository minorVisitRepository;
+    private final com.archery.range.repository.LostItemRepository lostItemRepository;
+    private final com.archery.range.repository.LostClaimRepository lostClaimRepository;
     private final RoundService roundService;
 
     public StatsService(LaneRepository laneRepository,
@@ -55,6 +57,8 @@ public class StatsService {
             com.archery.range.repository.MemberDebtRepository memberDebtRepository,
             com.archery.range.repository.GuardianConsentRepository guardianConsentRepository,
             com.archery.range.repository.MinorVisitRepository minorVisitRepository,
+            com.archery.range.repository.LostItemRepository lostItemRepository,
+            com.archery.range.repository.LostClaimRepository lostClaimRepository,
             RoundService roundService) {
         this.laneRepository = laneRepository;
         this.memberRepository = memberRepository;
@@ -69,6 +73,8 @@ public class StatsService {
         this.memberDebtRepository = memberDebtRepository;
         this.guardianConsentRepository = guardianConsentRepository;
         this.minorVisitRepository = minorVisitRepository;
+        this.lostItemRepository = lostItemRepository;
+        this.lostClaimRepository = lostClaimRepository;
         this.roundService = roundService;
     }
 
@@ -100,6 +106,14 @@ public class StatsService {
                 guardianConsentRepository.countByStatus("PENDING_CONFIRM"));
         counters.put("visitOpen", minorVisitRepository.findByStatusInOrderByIdDesc(
                 java.util.List.of("PENDING_PICKUP", "TRAINING", "PENDING_RETURN")).size());
+        counters.put("lostCustody", lostItemRepository.findByStatusInOrderByIdDesc(
+                java.util.List.of("REGISTERED", "IN_CUSTODY")).size());
+        counters.put("lostClaimPending", lostClaimRepository.findByStatusInOrderByIdDesc(
+                java.util.List.of("PENDING", "NEED_MORE")).size());
+        counters.put("lostToReturn", lostItemRepository.findByStatusInOrderByIdDesc(
+                java.util.List.of("TO_RETURN", "EXCEPTION")).size());
+        counters.put("lostToDispose", lostItemRepository.findByStatusInOrderByIdDesc(
+                java.util.List.of("TO_DISPOSE")).size());
 
         List<RoundDtos.RoundView> top = roundRepository.findByStatusOrderByStartTimeDesc("SUBMITTED").stream()
                 .sorted(Comparator.comparingInt((com.archery.range.domain.Round r) ->
